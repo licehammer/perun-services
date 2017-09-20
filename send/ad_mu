@@ -13,7 +13,9 @@ use Net::LDAP::Message;
 use Net::LDAP::LDIF;
 use Net::LDAP::Control::Paged;
 use Net::LDAP::Constant qw( LDAP_CONTROL_PAGED );
-use Time::Piece;
+use File::Copy;
+use Date::Calc qw/ Today Delta_Days Add_Delta_Days/;
+use utf8;
 no if $] >= 5.017011, warnings => 'experimental::smartmatch';
 
 # Import shared AD library
@@ -46,14 +48,55 @@ sub load_manual_employees;
 sub write_active_students_from_last_run;
 sub load_active_students_from_last_run;
 
+sub saveStoredUserStates;
+sub loadUsersState;
+
 # define service
 my $service_name = "ad_mu";
 
 ldap_log($service_name, "-- Propagation of $service_name service started.");
 END { ldap_log($service_name, "-- Propagation of $service_name service finished."); };
 
+
+##XXX 
+
+use Data::Dumper;
+
+my $R_NONE = 0x00;
+my $R_EMPLOYEE = 0x20;
+my $R_STUDENT = 0x10;
+my $GP_EMPLOYEE = 0x08;
+my $GP_STUDENT = 0x04;
+my $F_MANUAL = 0x02; #have manual extersion oa an account but don't have employee role at the same time
+my $F_ALUMNI = 0x01;
+
+my $USER_STATE_FILE ="/tmp/userState"; #TODO
+my $USER_STATE_TMP_FILE ="/tmp/userState.tmp"; #TODO
+my $USER_STATE_SEPARATOR ="\t";
+my $USER_STATE_DATE_SEPARATOR ="-";
+my $USER_STATE_ROLES = "roles";
+my $USER_STATE_GP_EMPLOYEE = "GP-Employee";
+my $USER_STATE_GP_STUDENT = "GP-Student";
+my $USER_STATE_GP_NOTIFICATION_SENT = "GP-Notification-sent";
+
+my $GRACE_PERIOD_EXPIRATION = 150; #days
+
+
+## init and "global" variables
+
+my @today = Today();
+#@today = Add_Delta_Days(@today, 160);  #DEBUG - add more day 
+#@today = ($year, $month, $date);
+
+my $userState; #state of all users 
+open USER_STATE_TMP_FILEHANDLE, ">", $USER_STATE_TMP_FILE or die "Cannot open $USER_STATE_TMP_FILE: $!";
+
+## end - init
+
+
+
 # if set all mail notifications about relation change are sent to this address !!
-my $debugMailAddress;
+my $debugMailAddress = 'slavek@ics.muni.cz';
 my $mailsSubjects; # $mailsSubjects->{mailType} = "Subject";
 my $mailsMessages; # $mailsMessages->{mailType} = "Message";
 # load notification texts
@@ -600,108 +643,62 @@ sub process_licenses_groups() {
 	# AD state can be filled from AD
 	$ad_state = fill_from_ad(\%ad_entries_group_map);
 
-	# Perun state is resolved from combination of $userRelations, local cache and AD
-	#
-	# 1. ZAM (employee) - perun + all from AD ZAM, which are waiting for removal by cache
-	# 2. STU (student) - perun + all from AD STU, which are waiting for removal by cache - (minus) resolved employees from the first step
-	#                    + all within STU gracePeriod, which are not in currently resolved ZAM/STU.
-	# 3. ALUM (alumni) - all users of AD, which are not in currently resolved ZAM/STU and were in $onceStudents.
-	# 4. Based on resolved relation for each user, license sub-groups are set based on current user licenses ($userLicenses).
 
-	#
-	# 1. resolve EMPLOYEES
-	#
-	my $employees;
-	# add employeees from perun
-	foreach my $user_dn (keys %{$userRelations}) {
-		if (defined $userRelations->{$user_dn}->{"ZAM"}) {
-			$employees->{$user_dn} = 1;
-		}
-	}
-	# add old employees from AD within grace period
-	foreach my $user_dn (keys %{$ad_state->{$employeeDN}}) {
-		unless (defined $employees->{$user_dn}) {
-			# IF NOT BETWEEN EMPLOYEES ALREADY - check and SET grace period
-			my $should_move = shouldMove($user_dn, $employeeDN);
-			unless ($should_move == 1) {
-				# keep old employee within 30 days grace period
-				$employees->{$user_dn} = 1;
-			}
-		}
-	}
-	$perun_state->{$employeeDN} = $employees;
 
-	#
-	# 2. resolve STUDENTS
-	#
-	my $students;
 
-	# add students from perun minus those, which were resolved as employees too !
-	foreach my $user_dn (keys %{$userRelations}) {
-		if (defined $userRelations->{$user_dn}->{"STU"} and !defined $employees->{$user_dn}) {
-			$students->{$user_dn} = 1;
-		}
-	}
-	# add old students from AD within grace period
-	foreach my $user_dn (keys %{$ad_state->{$studentDN}}) {
-		unless (defined $students->{$user_dn}) {
-			# IF NOT BETWEEN STUDENTS ALREADY - check and SET grace period
-			my $should_move = shouldMove($user_dn, $studentDN);
-			unless ($should_move == 1) {
-				# keep old student within 30 days grace period
-				$students->{$user_dn} = 1;
-			}
-		}
-	}
-	$perun_state->{$studentDN} = $students;
+## -- New code for user licences and notifications 
 
-	# add students, which are within STU gracePeriod but are no longer active students or employees
+#structure: $employees->{$userDN} = 1;
+my ($employees, $students, $alumni);
 
-	## set grace period to those, which were removed from active students based on local cache
-	foreach my $user_dn (keys %{$activeStudentsFromLastRun}) {
-		unless (defined $students->{$user_dn}) {
-			# IF NOT ACTIVE STUDENT - set grace period
-			shouldMove($user_dn, $studentDN);
-		}
+$userState = loadUsersState;
+
+foreach my $user (keys %{$userRelations}) {
+
+	my $oldRoles = $userState->{$user}->{$USER_STATE_ROLES};
+	my $rolesFromPerun = $R_NONE;
+	$rolesFromPerun |= $R_EMPLOYEE if($userRelations->{$user}->{"ZAM"});
+	$rolesFromPerun |= $R_STUDENT if($userRelations->{$user}->{"STU"});
+	$rolesFromPerun |= $F_MANUAL if($manualEmployees->{$user});
+
+
+	my $gracePeriodRoles = computeGracePeriod($user, $oldRoles, $rolesFromPerun);
+	my $roles = $rolesFromPerun | $gracePeriodRoles;
+
+	#if user is or was student, add alumi flag
+	$roles |= $F_ALUMNI if($rolesFromPerun & $R_STUDENT || $oldRoles ^ $F_ALUMNI);
+
+
+
+	my $emailTemplate = getEmailTemplate($oldRoles, $roles);
+
+	# TODO send the email
+
+	my $expiredGracePeriods = expireAndNotifyGracePeriods($user);
+	$roles &= ~$expiredGracePeriods;
+
+	$userState->{$user}->{$USER_STATE_ROLES} = $roles;
+	$userState = storeUserState($userState, $user);
+
+	my $o365Licence = getO365Licence($roles);
+	if($o365Licence & $R_EMPLOYEE) {
+		$employees->{$user} = 1;
+	} elsif ($o365Licence & $R_STUDENT) {
+		$students->{$user} = 1;
+	} elsif ($o365Licence & $F_ALUMNI) {
+		$alumni->{$user} = 1;
 	}
 
+}
 
-	# FIXME/TODO - kdy zpátky zapsat cache právě aktivních studentů ??? Na konci skriptu?
-	## resolve who to add based on grace period
-	## -> all within STU grace period, if not also employee or student-> put between students
-	my $currentDate = Time::Piece->strptime(localtime->ymd,"%Y-%m-%d")->epoch;
-	foreach my $user_dn (keys %{$waitingForRemoval}) {
-		if (defined $waitingForRemoval->{$user_dn}) {
-			if (defined $waitingForRemoval->{$user_dn}->{$studentDN}) {
-				my $gracePeriod = $waitingForRemoval->{$user_dn}->{$studentDN}->{"TIMESTAMP"};
-				if (defined $gracePeriod and $gracePeriod > 0) {
-					if ($currentDate < $gracePeriod) {
-						# is within student grace period
-						unless (defined $employees->{$user_dn} and defined $students->{$user_dn}) {
-							# not employee or student -> put back to students in AD
-							$students->{$user_dn} = 1;
-						}
-					}
-				}
-			}
-		}
-	}
+#TODO store rest of users from $userState
 
-	#
-	# 3. resolve ALUMNI
-	#
-	my $alumni;
+saveStoredUserStates;
 
-	# get all AD users
-	my @current_ad_users = load_ad($ldap, $base_dn, $filter, ['cn']);
-	my %current_ad_users_map = map { $_->dn() => 1 } @current_ad_users;
-	# if not currently employee / student and was once student -> put to alumni
-	foreach my $user_dn (keys %current_ad_users_map) {
-		if ((!defined $employees->{$user_dn}) and (!defined $students->{$user_dn}) and (defined $onceStudents->{$user_dn})) {
-			$alumni->{$user_dn} = 1;
-		}
-	}
-	$perun_state->{$alumniDN} = $alumni;
+
+## == END:  New code for user licences and notifications 
+
+
 
 	# 4. Based on current relation, fill license groups
 
@@ -729,15 +726,7 @@ sub process_licenses_groups() {
 
 	}
 
-	# TODO - Resolve which mail send based on relation changes - we will store calculated state as ".last" and compare next time.
 
-	# FIXME - send all mails and save mark for 14/2 days before expiration to $waitingForRemoval !!
-
-	# TODO - zapsat nový last stav peruna pro vyhodnocení mailů
-
-	# Store cache with updated grace periods and sent mails (14/2 days) so we do not sent mails twice or more times
-	#  - if store to cache fails - memory state is printed and script ends
-	store_waiting_for_removal($waitingForRemoval);
 
 	##
 	#
@@ -746,13 +735,13 @@ sub process_licenses_groups() {
 	# If any of requests to AD fail, script dies and current "waiting_on_remove" is not saved.
 	##
 
-	add_to_license_group($ad_entries_group_map{$employeeDN}, $ad_state->{$employeeDN}, $perun_state->{$employeeDN});
-	add_to_license_group($ad_entries_group_map{$studentDN}, $ad_state->{$studentDN}, $perun_state->{$studentDN});
-	add_to_license_group($ad_entries_group_map{$alumniDN}, $ad_state->{$alumniDN}, $perun_state->{$alumniDN});
+	add_to_license_group($ad_entries_group_map{$employeeDN}, $ad_state->{$employeeDN}, $employees);
+	add_to_license_group($ad_entries_group_map{$studentDN}, $ad_state->{$studentDN}, $students);
+	add_to_license_group($ad_entries_group_map{$alumniDN}, $ad_state->{$alumniDN}, $alumni);
 
-	remove_from_license_group($ad_entries_group_map{$employeeDN}, $ad_state->{$employeeDN}, $perun_state->{$employeeDN});
-	remove_from_license_group($ad_entries_group_map{$studentDN}, $ad_state->{$studentDN}, $perun_state->{$studentDN});
-	remove_from_license_group($ad_entries_group_map{$alumniDN}, $ad_state->{$alumniDN}, $perun_state->{$alumniDN});
+	remove_from_license_group($ad_entries_group_map{$employeeDN}, $ad_state->{$employeeDN}, $employees);
+	remove_from_license_group($ad_entries_group_map{$studentDN}, $ad_state->{$studentDN}, $students);
+	remove_from_license_group($ad_entries_group_map{$alumniDN}, $ad_state->{$alumniDN}, $alumni);
 
 	# process specific license groups
 	foreach my $group_dn (sort keys %{$perun_state}) {
@@ -761,21 +750,6 @@ sub process_licenses_groups() {
 			remove_from_license_group($ad_entries_group_map{$group_dn}, $ad_state->{$group_dn}, $perun_state->{$group_dn});
 		}
 	}
-
-	# CLEAR local CACHE based on current relation from perun
-	# Can be done only after successfull update of AD, since we MUST NOT lose grace period info !!
-	foreach (keys %{$userRelations}) {
-		if (defined $userRelations->{$_}->{"ZAM"}) {
-			$waitingForRemoval->{$_}->{$employeeDN}->{"TIMESTAMP"} = 0;
-			$waitingForRemoval->{$_}->{$studentDN}->{"TIMESTAMP"} = 0;  # clear also students
-		} elsif (defined $userRelations->{$_}->{"STU"}) {
-			$waitingForRemoval->{$_}->{$studentDN}->{"TIMESTAMP"} = 0;
-			$waitingForRemoval->{$_}->{$employeeDN}->{"TIMESTAMP"} = 0; # clear also employees
-		}
-	}
-
-	# store changed chache again - if store to cache fails - memory state is printed and script ends.
-	store_waiting_for_removal($waitingForRemoval);
 
 	# store msDS-cloudExtensionAttribute2=TRUE for active persons
 	update_cloudExtensionAttribute2($employees, $students, $alumni);
@@ -869,13 +843,6 @@ sub remove_from_license_group() {
 				# SUCCESS (group updated)
 				$counter_group_updated++;
 				ldap_log($service_name, "Group members removed: " . $ad_entry->dn() . " | \n" . join(",\n", @to_be_removed));
-
-				# For EMPLOYEE and STUDENTS groups, remove from cache
-				if (($ad_entry->dn() eq $employeeDN) or ($ad_entry->dn() eq $studentDN)) {
-					foreach (@to_be_removed) {
-						$waitingForRemoval->{$_}->{$ad_entry->dn()}->{"TIMESTAMP"} = 0;
-					}
-				}
 
 			} else {
 				# FAIL (to update group)
@@ -1094,7 +1061,7 @@ sub load_active_students_from_last_run() {
 
 		if ($? != 0) {
 			ldap_log($service_name, "Unable to load group members from AD: " . $dn2);
-			die "Cache file of 'active students' is empty and we were unable to load current state of AD to fill it for $dn";
+			die "Cache file of 'active students' is empty and we were unable to load current state of AD to fill it for $dn2";
 		} else {
 			push(@lines, @student_members);
 		}
@@ -1430,9 +1397,9 @@ sub sendMail() {
 	my $mail = MIME::Lite->new(
 		From     => $from,
 		To       => $to,
-		Reply-To => $reply,
-			Subject  => $subject,
-			Data     => $message
+		'Reply-To' => $reply,
+		Subject  => $subject,
+		Data     => $message
 	);
 
 	$mail->send;
@@ -1500,3 +1467,166 @@ sub load_manual_employees() {
 	return $manEmp;
 
 }
+
+
+
+
+
+
+sub loadUsersState {
+	open FILE, $USER_STATE_FILE or die "Cannot open $USER_STATE_FILE: $!";
+	my $userState;
+
+	while(my $line = <FILE>) {
+		my($user, $roles, $gracePeriodEmployee, $gracePeriodStudent, $gracePeriodNotificationSent) = split $USER_STATE_SEPARATOR, $line; 
+		$userState->{$user} = { $USER_STATE_ROLES => $roles,
+		                        $USER_STATE_GP_EMPLOYEE => $gracePeriodEmployee ? [ split($USER_STATE_DATE_SEPARATOR, $gracePeriodEmployee) ] : undef,
+		                        $USER_STATE_GP_STUDENT => $gracePeriodStudent ? [ split($USER_STATE_DATE_SEPARATOR, $gracePeriodStudent) ] : undef,
+		                        $USER_STATE_GP_NOTIFICATION_SENT => $gracePeriodNotificationSent,
+		                      }
+	}
+	close FILE or die "Cannot close $USER_STATE_FILE: $!";
+	return $userState;
+}
+
+sub storeUserState($$) {
+	my $userState = shift;
+	my $user = shift;
+	print USER_STATE_TMP_FILEHANDLE join($USER_STATE_SEPARATOR, ($user, 
+	                                                             $userState->{$user}->{$USER_STATE_ROLES}, 
+	                                                             ($userState->{$user}->{$USER_STATE_GP_EMPLOYEE} ? join($USER_STATE_DATE_SEPARATOR, @{$userState->{$user}->{$USER_STATE_GP_EMPLOYEE}}) : ""), 
+	                                                             ($userState->{$user}->{$USER_STATE_GP_STUDENT} ? join($USER_STATE_DATE_SEPARATOR, @{$userState->{$user}->{$USER_STATE_GP_STUDENT}}) : ""), 
+	                                                             $userState->{$user}->{$USER_STATE_GP_NOTIFICATION_SENT} || 0,   #FIXME
+	                                                            )
+	                                     );
+	print USER_STATE_TMP_FILEHANDLE "\n";
+	$userState->{$user} = undef;
+	return $userState;
+}
+
+sub saveStoredUserStates {
+	close USER_STATE_TMP_FILEHANDLE or die "Cannot close $USER_STATE_TMP_FILE: $!";
+	move $USER_STATE_TMP_FILE, $USER_STATE_FILE or die "Cannot move tmp state $USER_STATE_TMP_FILE to current state $USER_STATE_FILE: $!";
+}
+
+sub computeGracePeriod($$$) {
+	my ($user, $oldRoles, $rolesFromPerun) = @_;
+
+	my $gracePeriodRoles = $R_NONE;
+
+	#if user get the role again, remove conresponding grace period
+	if($rolesFromPerun & $R_EMPLOYEE) { removeGracePeriod($user, $GP_EMPLOYEE); }
+	if($rolesFromPerun & $R_STUDENT) { removeGracePeriod($user, $GP_STUDENT); }
+
+	$gracePeriodRoles |= getGracePeriods($user);
+
+	#start new grace periods
+	if(($oldRoles & $R_EMPLOYEE) && !($rolesFromPerun & $R_EMPLOYEE)) { 
+		startGracePeriod($user, $GP_EMPLOYEE);
+		$gracePeriodRoles |= $GP_EMPLOYEE;
+	}
+	if(($oldRoles & $R_STUDENT) && !($rolesFromPerun & $R_STUDENT)) { 
+		startGracePeriod($user, $GP_STUDENT);
+		$gracePeriodRoles |= $GP_STUDENT;
+	}
+	
+	return $gracePeriodRoles;
+}
+
+#input roles
+sub getO365Licence($) {
+	$_ = shift;
+	if($_ & ($R_EMPLOYEE || $GP_EMPLOYEE)) {
+		return $R_EMPLOYEE;
+	} elsif($_ & ($R_STUDENT || $GP_STUDENT)) {
+		return $R_STUDENT;
+	} elsif($_ & $F_ALUMNI) {
+		return $F_ALUMNI;
+	}
+	return $R_NONE;
+}
+
+
+sub startGracePeriod($$) {
+	my ($user, $roles) = @_;
+	print "Starting grace for $user and role: " . roleToString($roles) . "\n";
+
+	my $gpType;
+	if($roles == $GP_EMPLOYEE) {
+		$gpType = $USER_STATE_GP_EMPLOYEE;
+	} elsif($roles == $GP_STUDENT) {
+		$gpType = $USER_STATE_GP_EMPLOYEE;
+	} else {
+		die "Unsupported role: " . $roles;
+	}
+	$userState->{$user}->{$gpType} = \@today;
+	1;
+}
+
+sub removeGracePeriod($) {
+	my ($user, $roles) = @_;
+	print "Removing grace for $user and role: " . roleToString($roles) . "\n";
+
+	my $gpType;
+	if($roles == $GP_EMPLOYEE) {
+		$gpType = $USER_STATE_GP_EMPLOYEE;
+	} elsif($roles == $GP_STUDENT) {
+		$gpType = $USER_STATE_GP_EMPLOYEE;
+	} else {
+		die "Unsupported role: " . $roles;
+	}
+	$userState->{$user}->{$gpType} = undef;
+}
+
+sub getGracePeriods($) {
+	my $user = shift;
+	print "Getting grace for $user \n";
+
+	my $gracePeriodRoles = $R_NONE;
+
+	if($userState->{$user}->{$USER_STATE_GP_EMPLOYEE}) {
+		if(Delta_Days(@{$userState->{$user}->{$USER_STATE_GP_EMPLOYEE}}, @today) < $GRACE_PERIOD_EXPIRATION) {
+			$gracePeriodRoles |= $GP_EMPLOYEE;
+		}
+	}
+
+	if($userState->{$user}->{$USER_STATE_GP_STUDENT}) {
+		if(Delta_Days(@{$userState->{$user}->{$USER_STATE_GP_STUDENT}}, @today) < $GRACE_PERIOD_EXPIRATION) {
+			$gracePeriodRoles |= $GP_STUDENT;
+		}
+	}
+
+	return $gracePeriodRoles;
+
+}
+
+sub getEmailTemplate($$) {
+	my ($oldRoles, $newRoles) = @_;
+	#TODO
+	print "Getting email for old: " . roleToString($oldRoles) . "  new: " . roleToString($newRoles) . " \n";
+	return "template1";
+}
+
+sub roleToString($) {
+	my $role = shift;
+	my $output = "";
+
+	$output .= "E" if($role & $R_EMPLOYEE);
+	$output .= "gE" if($role & $GP_EMPLOYEE);
+	$output .= "S" if($role & $R_STUDENT);
+	$output .= "gS" if($role & $GP_STUDENT);
+	$output .= "M" if($role & $F_MANUAL);
+	$output .= "A" if($role & $F_ALUMNI);
+
+	return $output;
+
+}
+
+sub expireAndNotifyGracePeriods($) {
+	my $user = shift;
+
+	print "expireAndNotifyGracePeriods $user \n";
+	#TODO
+
+}
+

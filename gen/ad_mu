@@ -161,7 +161,8 @@ sub processMembers() {
 			$usersRelation->{$dn}->{$relationType} = 1 if($relationType);  # store relation if resource define it
 
 			# if user has manually extended employee relation - put him to employee too, disregard any other relation
-			if (defined $memberAttributes{$A_U_F_O365_ACCOUNT_EXTENSION} and length $memberAttributes{$A_U_F_O365_ACCOUNT_EXTENSION}) {
+			#if (defined $memberAttributes{$A_U_F_O365_ACCOUNT_EXTENSION} and length $memberAttributes{$A_U_F_O365_ACCOUNT_EXTENSION}) {
+			if (!defined $usersRelation->{$dn}->{"ZAM"} and defined $memberAttributes{$A_U_F_O365_ACCOUNT_EXTENSION} and length $memberAttributes{$A_U_F_O365_ACCOUNT_EXTENSION}) {
 				my $currentDate = Time::Piece->strptime(localtime->ymd,"%Y-%m-%d");
 				my $employeeExtendedDate = Time::Piece->strptime($memberAttributes{$A_U_F_O365_ACCOUNT_EXTENSION},"%Y-%m-%d");
 				if ($employeeExtendedDate->epoch >= $currentDate->epoch){
