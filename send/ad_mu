@@ -60,18 +60,14 @@ END { ldap_log($service_name, "-- Propagation of $service_name service finished.
 
 ##XXX 
 
-use Data::Dumper;
-
 my $R_NONE = 0x00;
 my $R_EMPLOYEE = 0x20;
 my $R_STUDENT = 0x10;
 my $GP_EMPLOYEE = 0x08;
 my $GP_STUDENT = 0x04;
-my $F_MANUAL = 0x02; #have manual extersion oa an account but don't have employee role at the same time
+my $F_MANUAL = 0x02; #have manual extersion of an account but don't have employee role at the same time
 my $F_ALUMNI = 0x01;
 
-my $USER_STATE_FILE ="/tmp/userState"; #TODO
-my $USER_STATE_TMP_FILE ="/tmp/userState.tmp"; #TODO
 my $USER_STATE_SEPARATOR ="\t";
 my $USER_STATE_DATE_SEPARATOR ="-";
 my $USER_STATE_ROLES = "roles";
@@ -82,10 +78,17 @@ my $USER_STATE_GP_NOTIFICATION_SENT = "GP-Notification-sent";
 my $GRACE_PERIOD_EXPIRATION = 150; #days
 
 
+my $facility_name = $ARGV[0];
+chomp($facility_name);
+
+my $USER_STATE_FILE ="spool/$facility_name/ad_mu/userState";
+my $USER_STATE_TMP_FILE ="spool/$facility_name/ad_mu/userState.tmp";
+
+
 ## init and "global" variables
 
 my @today = Today();
-#@today = Add_Delta_Days(@today, 160);  #DEBUG - add more day 
+#@today = Add_Delta_Days(@today, 150);  #DEBUG - add more day 
 #@today = ($year, $month, $date);
 
 my $userState; #state of all users 
@@ -103,8 +106,6 @@ my $mailsMessages; # $mailsMessages->{mailType} = "Message";
 loadMailTexts();
 
 # GEN folder location
-my $facility_name = $ARGV[0];
-chomp($facility_name);
 my $service_files_base_dir="../gen/spool";
 my $service_files_dir="$service_files_base_dir/$facility_name/$service_name";
 
@@ -161,7 +162,7 @@ my $counter_group_failed = 0;
 my @perun_entries = load_perun($service_files_dir . "/" . $service_name . ".ldif");
 
 # load normal user entries
-my @ad_entries = load_ad($ldap, $base_dn, $filter, ['displayName','cn','sn','givenName','mail','samAccountName','userPrincipalName','userAccountControl','ProxyAddresses','MailNickName','msDS-cloudExtensionAttribute1','msDS-cloudExtensionAttribute3']);
+my @ad_entries = load_ad($ldap, $base_dn, $filter, ['displayName','cn','sn','givenName','mail','samAccountName','userPrincipalName','userAccountControl','ProxyAddresses','MailNickName','c','msDS-cloudExtensionAttribute1','msDS-cloudExtensionAttribute3']);
 
 my %ad_entries_map = ();
 my %perun_entries_map = ();
@@ -191,11 +192,11 @@ my $userLicenses = load_users_licenses(); # $userLicenses->{$user_dn}->{licenseG
 my $manualEmployees = load_manual_employees(); # $manualEmployees->{$user_dn} = 1;
 
 # load local caches before processing license groups and also store all "students" back to file
-my $onceStudents = load_cached_students($userRelations); # $onceStudents->{$user_dn} = 1;
-my $activeStudentsFromLastRun = load_active_students_from_last_run(); # $activeStudentsFromLastRun->{$user_dn} = 1;
+#my $onceStudents = load_cached_students($userRelations); # $onceStudents->{$user_dn} = 1;
+#my $activeStudentsFromLastRun = load_active_students_from_last_run(); # $activeStudentsFromLastRun->{$user_dn} = 1;
 
 # load waiting for removal
-my $waitingForRemoval = load_waiting_for_removal(); # $waitingForRemoval->{$user_dn}->{$group_dn}->{TIMESTAMP|14DAYS|2DAYS} = $timestamp or 0 | sent | sent;
+#my $waitingForRemoval = load_waiting_for_removal(); # $waitingForRemoval->{$user_dn}->{$group_dn}->{TIMESTAMP|14DAYS|2DAYS} = $timestamp or 0 | sent | sent;
 
 # process it
 process_licenses_groups();
@@ -283,7 +284,7 @@ sub process_update_user() {
 			my $ad_entry = $ad_entries_map{$perun_entry->get_value('samAccountName')};
 
 			# attrs without cn since it's part of DN to be updated
-			my @attrs = ('displayName','sn','givenName','mail','MailNickName','ProxyAddresses','msDS-cloudExtensionAttribute1','msDS-cloudExtensionAttribute3');
+			my @attrs = ('displayName','sn','givenName','mail','MailNickName','ProxyAddresses','c','msDS-cloudExtensionAttribute1','msDS-cloudExtensionAttribute3');
 			# stored log messages to check if entry should be updated
 			my @entry_changed = ();
 
@@ -506,6 +507,7 @@ sub process_groups() {
 					'extensionAttribute1' => 'FALSE'
 				);
 
+=c TODO
 				my $response = $ldap->update($ad_entry);
 				unless ($response->is_error()) {
 					ldap_log($service_name, "Group emptied: ".$ad_entry->dn());
@@ -515,6 +517,7 @@ sub process_groups() {
 					ldap_log($service_name, $ad_entry->ldif());
 					$counter_group_failed++;
 				}
+=cut
 			}
 
 		}
@@ -653,9 +656,14 @@ my ($employees, $students, $alumni);
 
 $userState = loadUsersState;
 
-foreach my $user (keys %{$userRelations}) {
+my %allUsers;
+$allUsers{$_} = 1 foreach keys %{$userRelations};
+$allUsers{$_} = 1 foreach keys %{$userState};
 
-	my $oldRoles = $userState->{$user}->{$USER_STATE_ROLES};
+
+foreach my $user (keys %allUsers) {
+
+	my $oldRoles = $userState->{$user}->{$USER_STATE_ROLES} || $R_NONE;
 	my $rolesFromPerun = $R_NONE;
 	$rolesFromPerun |= $R_EMPLOYEE if($userRelations->{$user}->{"ZAM"});
 	$rolesFromPerun |= $R_STUDENT if($userRelations->{$user}->{"STU"});
@@ -666,8 +674,7 @@ foreach my $user (keys %{$userRelations}) {
 	my $roles = $rolesFromPerun | $gracePeriodRoles;
 
 	#if user is or was student, add alumi flag
-	$roles |= $F_ALUMNI if($rolesFromPerun & $R_STUDENT || $oldRoles ^ $F_ALUMNI);
-
+	$roles |= $F_ALUMNI if($rolesFromPerun & $R_STUDENT || $oldRoles & $F_ALUMNI);
 
 
 	my $emailTemplate = getEmailTemplate($oldRoles, $roles);
@@ -772,7 +779,7 @@ sub add_to_license_group() {
 	my $ad_members_state = shift;
 	my $perun_members_state = shift;
 
-	my @to_be_added;
+	my @to_be_added = ();
 
 	foreach (keys %{$perun_members_state}) {
 		unless (defined $ad_members_state->{$_}) {
@@ -783,24 +790,32 @@ sub add_to_license_group() {
 	@to_be_added = sort @to_be_added;
 
 	if (@to_be_added) {
-		$ad_entry->add(
-			'member' => \@to_be_added
-		);
 
-		# Update entry in AD
-		my $response = $ad_entry->update($ldap);
+		#AD need to process changes in chunks of max 5000
+		my @chunks = ();
+		push @chunks, [ splice @to_be_added, 0, 1000 ] while @to_be_added;
 
-		if ($response) {
-			unless ($response->is_error()) {
-				# SUCCESS (group updated)
-				$counter_group_updated++;
-				ldap_log($service_name, "Group members added: " . $ad_entry->dn() . " | \n" . join(",\n", @to_be_added));
-			} else {
-				# FAIL (to update group)
-				$counter_group_failed++;
-				ldap_log($service_name, "Group members NOT added: " . $ad_entry->dn() . " | " . $response->error());
-				ldap_log($service_name, $ad_entry->ldif());
-				die "Group members NOT added: " . $ad_entry->dn() . " | " . $response->error();
+		for my $chunk (@chunks) {
+
+			$ad_entry->add(
+				'member' => $chunk
+			);
+
+			# Update entry in AD
+			my $response = $ad_entry->update($ldap);
+
+			if ($response) {
+				unless ($response->is_error()) {
+					# SUCCESS (group updated)
+					$counter_group_updated++;
+					ldap_log($service_name, "Group members added: " . $ad_entry->dn() . " | \n" . join(",\n", @$chunk));
+				} else {
+					# FAIL (to update group)
+					$counter_group_failed++;
+					ldap_log($service_name, "Group members NOT added: " . $ad_entry->dn() . " | " . $response->error());
+					ldap_log($service_name, $ad_entry->ldif());
+					die "Group members NOT added: " . $ad_entry->dn() . " | " . $response->error();
+				}
 			}
 		}
 	}
@@ -899,6 +914,7 @@ sub ping_password_setter() {
 		$insert->execute($login);
 
 	}
+	$changeExists->finish();
 
 	commit $dbh;
 	$dbh->disconnect();
@@ -1172,6 +1188,7 @@ sub store_waiting_for_removal() {
 #
 # Return 1 if should move to lower relation, 0 if should be kept in current relation
 #
+=c DELETE
 sub shouldMove() {
 
 	my $login = shift;
@@ -1195,6 +1212,7 @@ sub shouldMove() {
 	return $moveNow;
 
 }
+=cut
 
 #
 # Return hash strucure of AD license groups like $ad_state->{group_dn}->{user_dn} = 1;
@@ -1478,6 +1496,7 @@ sub loadUsersState {
 	my $userState;
 
 	while(my $line = <FILE>) {
+		chomp($line);
 		my($user, $roles, $gracePeriodEmployee, $gracePeriodStudent, $gracePeriodNotificationSent) = split $USER_STATE_SEPARATOR, $line; 
 		$userState->{$user} = { $USER_STATE_ROLES => $roles,
 		                        $USER_STATE_GP_EMPLOYEE => $gracePeriodEmployee ? [ split($USER_STATE_DATE_SEPARATOR, $gracePeriodEmployee) ] : undef,
@@ -1485,6 +1504,11 @@ sub loadUsersState {
 		                        $USER_STATE_GP_NOTIFICATION_SENT => $gracePeriodNotificationSent,
 		                      }
 	}
+
+	#print "loaded:\n";
+	#print Dumper $userState;
+	
+
 	close FILE or die "Cannot close $USER_STATE_FILE: $!";
 	return $userState;
 }
@@ -1492,6 +1516,10 @@ sub loadUsersState {
 sub storeUserState($$) {
 	my $userState = shift;
 	my $user = shift;
+
+	#print "storing:\n";
+	#print Dumper $userState;
+
 	print USER_STATE_TMP_FILEHANDLE join($USER_STATE_SEPARATOR, ($user, 
 	                                                             $userState->{$user}->{$USER_STATE_ROLES}, 
 	                                                             ($userState->{$user}->{$USER_STATE_GP_EMPLOYEE} ? join($USER_STATE_DATE_SEPARATOR, @{$userState->{$user}->{$USER_STATE_GP_EMPLOYEE}}) : ""), 
@@ -1536,9 +1564,9 @@ sub computeGracePeriod($$$) {
 #input roles
 sub getO365Licence($) {
 	$_ = shift;
-	if($_ & ($R_EMPLOYEE || $GP_EMPLOYEE)) {
+	if($_ & ($R_EMPLOYEE | $GP_EMPLOYEE)) {
 		return $R_EMPLOYEE;
-	} elsif($_ & ($R_STUDENT || $GP_STUDENT)) {
+	} elsif($_ & ($R_STUDENT | $GP_STUDENT)) {
 		return $R_STUDENT;
 	} elsif($_ & $F_ALUMNI) {
 		return $F_ALUMNI;
@@ -1549,13 +1577,13 @@ sub getO365Licence($) {
 
 sub startGracePeriod($$) {
 	my ($user, $roles) = @_;
-	print "Starting grace for $user and role: " . roleToString($roles) . "\n";
+	#print "Starting grace for $user and role: " . roleToString($roles) . "\n";
 
 	my $gpType;
 	if($roles == $GP_EMPLOYEE) {
 		$gpType = $USER_STATE_GP_EMPLOYEE;
 	} elsif($roles == $GP_STUDENT) {
-		$gpType = $USER_STATE_GP_EMPLOYEE;
+		$gpType = $USER_STATE_GP_STUDENT;
 	} else {
 		die "Unsupported role: " . $roles;
 	}
@@ -1565,13 +1593,13 @@ sub startGracePeriod($$) {
 
 sub removeGracePeriod($) {
 	my ($user, $roles) = @_;
-	print "Removing grace for $user and role: " . roleToString($roles) . "\n";
+	#print "Removing grace for $user and role: " . roleToString($roles) . "\n";
 
 	my $gpType;
 	if($roles == $GP_EMPLOYEE) {
 		$gpType = $USER_STATE_GP_EMPLOYEE;
 	} elsif($roles == $GP_STUDENT) {
-		$gpType = $USER_STATE_GP_EMPLOYEE;
+		$gpType = $USER_STATE_GP_STUDENT;
 	} else {
 		die "Unsupported role: " . $roles;
 	}
@@ -1580,13 +1608,14 @@ sub removeGracePeriod($) {
 
 sub getGracePeriods($) {
 	my $user = shift;
-	print "Getting grace for $user \n";
+	#print "Getting grace for $user \n";
 
 	my $gracePeriodRoles = $R_NONE;
 
 	if($userState->{$user}->{$USER_STATE_GP_EMPLOYEE}) {
 		if(Delta_Days(@{$userState->{$user}->{$USER_STATE_GP_EMPLOYEE}}, @today) < $GRACE_PERIOD_EXPIRATION) {
 			$gracePeriodRoles |= $GP_EMPLOYEE;
+			#print "Giving grace employee \n";
 		}
 	}
 
@@ -1603,7 +1632,7 @@ sub getGracePeriods($) {
 sub getEmailTemplate($$) {
 	my ($oldRoles, $newRoles) = @_;
 	#TODO
-	print "Getting email for old: " . roleToString($oldRoles) . "  new: " . roleToString($newRoles) . " \n";
+	#print "Getting email for old: " . roleToString($oldRoles) . "  new: " . roleToString($newRoles) . " \n";
 	return "template1";
 }
 
@@ -1625,8 +1654,9 @@ sub roleToString($) {
 sub expireAndNotifyGracePeriods($) {
 	my $user = shift;
 
-	print "expireAndNotifyGracePeriods $user \n";
+	#print "expireAndNotifyGracePeriods $user \n";
 	#TODO
+	return $R_NONE;
 
 }
 
