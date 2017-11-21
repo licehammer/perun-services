@@ -43,12 +43,12 @@ our $A_R_RELATION_TYPE;  *A_R_RELATION_TYPE = \'urn:perun:resource:attribute-def
 our $A_G_R_AD_NAME;  *A_G_R_AD_NAME = \'urn:perun:group_resource:attribute-def:def:adName';
 our $A_G_R_AD_DISPLAY_NAME;  *A_G_R_AD_DISPLAY_NAME = \'urn:perun:group_resource:attribute-def:def:adDisplayName';
 our $A_G_R_msExchRequireAuthToSendTo;  *A_G_R_msExchRequireAuthToSendTo = \'urn:perun:group_resource:attribute-def:def:adRequireSenderAuthenticationEnabled';
-our $A_G_R_AD_EMAIL_ADDRESSES;  *A_G_R_AD_EMAIL_ADDRESSES = \'urn:perun:group_resource:attribute-def:def:o365EmailAddresses';
+our $A_G_R_AD_EMAIL_ADDRESSES;  *A_G_R_AD_EMAIL_ADDRESSES = \'urn:perun:group_resource:attribute-def:def:o365EmailAddresses:mu';
 
 # User/member attributes
 our $A_FIRST_NAME;  *A_FIRST_NAME = \'urn:perun:user:attribute-def:core:firstName';
 our $A_LAST_NAME;  *A_LAST_NAME = \'urn:perun:user:attribute-def:core:lastName';
-our $A_M_MAILS;  *A_M_MAILS = \'urn:perun:member:attribute-def:def:o365EmailAddresses';
+our $A_M_MAILS;  *A_M_MAILS = \'urn:perun:member:attribute-def:def:o365EmailAddresses:mu';
 our $A_LOGIN; *A_LOGIN = \'urn:perun:user_facility:attribute-def:virt:login';
 our $A_M_G_O365_SEND_ON_BEHALF; *A_M_G_O365_SEND_ON_BEHALF = \'urn:perun:member_group:attribute-def:def:o365SendOnBehalf';
 our $A_U_F_O365_ACCOUNT_EXTENSION; *A_U_F_O365_ACCOUNT_EXTENSION = \'urn:perun:user_facility:attribute-def:def:o365AccountExtension';
@@ -479,6 +479,8 @@ for my $login (@logins) {
 	}
 
 	print FILE "c: CZ\n";
+
+	print FILE "targetaddress: " . $login . '@mail.muni.cz' . "\n";
 
 	print FILE "msDS-cloudExtensionAttribute1: " . $login . '@' . $facilityAttributes{$A_F_AZURE_DOMAIN} . "\n";
 

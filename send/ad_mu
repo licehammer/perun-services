@@ -1,12 +1,28 @@
 #!/usr/bin/perl
 
+my @today = Today();
+#@today = Add_Delta_Days(@today, 155);  #DEBUG - add more day 
+@today = (2020, 6, 23); #DEBUG - set fo fixed date
+
+
 use strict;
 use warnings;
+use utf8;
 use DBI;
 use Data::Dumper;
 use File::Path qw(make_path);
 use Switch;
 use MIME::Lite;
+
+    package MIME::Lite::IO_Handle {
+        no warnings "redefine";
+        sub print {
+            my $self = shift;
+            binmode $$self => ":utf8";
+            print {$$self} @_;
+        }
+    };
+
 use Net::LDAPS;
 use Net::LDAP::Entry;
 use Net::LDAP::Message;
@@ -15,9 +31,9 @@ use Net::LDAP::Control::Paged;
 use Net::LDAP::Constant qw( LDAP_CONTROL_PAGED );
 use File::Copy;
 use Date::Calc qw/ Today Delta_Days Add_Delta_Days Date_to_Days /;
-use utf8;
 no if $] >= 5.017011, warnings => 'experimental::smartmatch';
 
+binmode STDOUT, ":utf8";
 
 my $MAIL_newUser=<<'END';
 Vážený uživateli,
@@ -69,6 +85,7 @@ Vážený uživateli,
 vzhledem k tomu, že již nejste zaměstnancem <<o365Role>>, dojde ke dni <<o365Expiration>> k převedení Vašeho účtu MS Office 365 na absolventský mód. Účet jako takový zůstane zachován, z nástrojů však budete mít k dispozici pouze poštu, kalendář, kontakty a úkoly.
 Pokud se do uplynutí lhůty stanete znovu zaměstnancem nebo studentem/studentem nebo zaměstnancem Masarykovy univerzity, nadále Vám zůstává k dispozici účet se všemi funkcemi, a to opět po dobu zaměstnaneckého poměru nebo studia.
 V odůvodněných případech můžete také požádat o prodloužení životnosti účtu na delší dobu či na neurčito své lokální správce IT – it.muni.cz/it-centra-na-muni.
+
 V případě nejasností se prosím obraťte na helpdesk@ics.muni.cz.
 Děkujeme za pochopení.
 Ústav výpočetní techniky MU
@@ -81,6 +98,7 @@ vzhledem k tomu, že již nejste <<o365Role>>, dojde ke dni <<o365Expiration>> 
 Pokud se do uplynutí lhůty stanete znovu zaměstnancem nebo studentem Masarykovy univerzity, nadále Vám zůstává k dispozici účet se všemi funkcemi, a to opět po dobu zaměstnaneckého poměru nebo studia.
 V odůvodněných případech můžete také požádat o prodloužení životnosti účtu na delší dobu či na neurčito své lokální správce IT – it.muni.cz/it-centra-na-muni.
 Po uplynutí lhůty se Vám účet zruší a pošta se přesměruje do ISu nebo na adresu, kterou si manuálně nastavíte v INETu na adrese inet.muni.cz/app/o365/nastaveni.
+
 V případě nejasností se prosím obraťte na helpdesk@ics.muni.cz.
 Děkujeme za pochopení.
 Ústav výpočetní techniky MU
@@ -90,6 +108,7 @@ my $MAIL_GPReminderAlumni =<<'END';
 Vážený uživateli,
 jak jsme Vás dříve informovali, z důvodu ukončení <<o365Role>> dojde ke dni <<o365Expiration>> k převedení Vašeho účtu MS Office 365 na absolventský mód. Účet jako takový zůstane zachován, z nástrojů však budete mít k dispozici pouze poštu, kalendář, kontakty a úkoly.
 Pokud se do uplynutí lhůty stanete znovu zaměstnancem nebo studentem/studentem nebo zaměstnancem Masarykovy univerzity, nadále Vám zůstává k dispozici účet se všemi funkcemi, a to opět po dobu zaměstnaneckého poměru nebo studia.
+
 V případě nejasností se prosím obraťte na helpdesk@ics.muni.cz.
 Děkujeme za pochopení.
 Ústav výpočetní techniky MU
@@ -100,6 +119,7 @@ Vážený uživateli,
 jak jsme Vás dříve informovali, z důvodu ukončení <<o365Role>> dojde ke dni <<o365Expiration>> k převedení Vašeho účtu MS Office 365 na absolventský mód. Účet jako takový zůstane zachován, z nástrojů však budete mít k dispozici pouze poštu, kalendář, kontakty a úkoly.
 Pokud se do uplynutí lhůty stanete znovu zaměstnancem nebo studentem/studentem nebo zaměstnancem Masarykovy univerzity, nadále Vám zůstává k dispozici účet se všemi funkcemi, a to opět po dobu zaměstnaneckého poměru nebo studia.
 V odůvodněných případech můžete také požádat o prodloužení životnosti účtu na delší dobu či na neurčito své lokální správce IT – it.muni.cz/it-centra-na-muni.
+
 V případě nejasností se prosím obraťte na helpdesk@ics.muni.cz.
 Děkujeme za pochopení.
 Ústav výpočetní techniky MU
@@ -111,6 +131,7 @@ jak jsme Vás dříve informovali, z důvodu ukončení <<o365Role>> dojde ke d
 Pokud se během této doby znovu stanete zaměstnancem nebo studentem Masarykovy univerzity, nadále Vám zůstává k dispozici účet se všemi funkcemi, a to opět po dobu zaměstnaneckého poměru nebo studia.
 V odůvodněných případech můžete také požádat o prodloužení životnosti účtu na delší dobu či na neurčito své lokální správce IT – it.muni.cz/it-centra-na-muni.
 Po uplynutí lhůty se Vám účet zruší a pošta se přesměruje do ISu nebo na adresu, kterou si manuálně nastavíte v INETu na adrese inet.muni.cz/app/o365/nastaveni.
+
 V případě nejasností se prosím obraťte na helpdesk@ics.muni.cz.
 Děkujeme za pochopení.
 Ústav výpočetní techniky MU
@@ -122,9 +143,6 @@ my $MAIL_SUBSTITUTE_PLACEHOLDER_O365EXPIRATION = '<<o365Expiration>>';
 my $MAIL_SUBSTITUTE_O365ROLE_EMPLOYEE = "zaměstnancem";
 my $MAIL_SUBSTITUTE_O365ROLE_STUDENT = "studentem";
 my $MAIL_SUBSTITUTE_O365ROLE_MANUAL = "externím spolupracovníkem";
-
-
-
 
 
 # Import shared AD library
@@ -199,10 +217,6 @@ my $USER_STATE_TMP_FILE ="spool/$facility_name/ad_mu/userState.tmp";
 
 ## init and "global" variables
 
-my @today = Today();
-#@today = Add_Delta_Days(@today, 150);  #DEBUG - add more day 
-#@today = ($year, $month, $date);
-
 my $userState; #state of all users 
 open USER_STATE_TMP_FILEHANDLE, ">", $USER_STATE_TMP_FILE or die "Cannot open $USER_STATE_TMP_FILE: $!";
 
@@ -211,7 +225,8 @@ open USER_STATE_TMP_FILEHANDLE, ">", $USER_STATE_TMP_FILE or die "Cannot open $U
 
 
 # if set all mail notifications about relation change are sent to this address !!
-my $debugMailAddress = 'slavek@ics.muni.cz';
+#my $debugMailAddress = 'roman.kruzik@muni.cz';
+my $debugMailAddress = 'roman.kruzik@muni.cz';
 
 # GEN folder location
 my $service_files_base_dir="../gen/spool";
@@ -270,19 +285,23 @@ my $counter_group_failed = 0;
 my @perun_entries = load_perun($service_files_dir . "/" . $service_name . ".ldif");
 
 # load normal user entries
-my @ad_entries = load_ad($ldap, $base_dn, $filter, ['displayName','cn','sn','givenName','mail','samAccountName','userPrincipalName','userAccountControl','ProxyAddresses','MailNickName','c','msDS-cloudExtensionAttribute1','msDS-cloudExtensionAttribute3']);
+my @ad_entries = load_ad($ldap, $base_dn, $filter, ['displayName','cn','sn','givenName','mail','samAccountName','userPrincipalName','userAccountControl','ProxyAddresses','MailNickName','c','msDS-cloudExtensionAttribute1','msDS-cloudExtensionAttribute3', 'targetaddress']);
 
 my %ad_entries_map = ();
 my %perun_entries_map = ();
+my %mailAdresses = ();
 
 foreach my $ad_entry (@ad_entries) {
 	my $login = $ad_entry->get_value('samAccountName');
 	$ad_entries_map{ $login } = $ad_entry;
+	$mailAdresses{ $ad_entry->dn  } = $ad_entry->get_value("mail");
 }
 foreach my $perun_entry (@perun_entries) {
 	my $login = $perun_entry->get_value('samAccountName');
 	$perun_entries_map{ $login } = $perun_entry;
+	$mailAdresses{ $perun_entry->dn } = $perun_entry->get_value("mail");
 }
+
 
 # PROCESS USERS
 process_add_user();
@@ -392,7 +411,7 @@ sub process_update_user() {
 			my $ad_entry = $ad_entries_map{$perun_entry->get_value('samAccountName')};
 
 			# attrs without cn since it's part of DN to be updated
-			my @attrs = ('displayName','sn','givenName','mail','MailNickName','ProxyAddresses','c','msDS-cloudExtensionAttribute1','msDS-cloudExtensionAttribute3');
+			my @attrs = ('displayName','sn','givenName','mail','MailNickName','ProxyAddresses','c','msDS-cloudExtensionAttribute1','msDS-cloudExtensionAttribute3', 'targetaddress');
 			# stored log messages to check if entry should be updated
 			my @entry_changed = ();
 
@@ -787,18 +806,19 @@ foreach my $user (keys %allUsers) {
 
 
 
-	my $expiredGracePeriods = expireAndNotifyGracePeriods($user);
+	my $expiredGracePeriods = expireAndNotifyGracePeriods($user, $roles);
 	$roles &= ~$expiredGracePeriods;
 
-	my $emailTemplate = getEmailTemplate($oldRoles, $roles);
+	my $emailTemplate = getEmailTemplateAndSetNotificationSentState($oldRoles, $roles, $user);
 	if($emailTemplate) {
 		$emailTemplate = substituteVariablesInEmailTemplate($emailTemplate, $user, $roles);
 
-		sendMail($emailTemplate, ""); #TODO
-		$userState->{$user}->{$USER_STATE_GP_NOTIFICATION_SENT} = $USER_STATE_GP_NOTIFICATION_SENT_INICIAL;
+		sendMail($emailTemplate, $mailAdresses{$user});
 	}
 
+
 	$userState->{$user}->{$USER_STATE_ROLES} = $roles;
+	#print "New roles: " . roleToString($roles) . "\n";
 	$userState = storeUserState($userState, $user);
 
 	my $o365Licence = getO365Licence($roles);
@@ -1486,8 +1506,8 @@ sub sendMail($$) {
 	my $to = shift;
 
 	if (defined $debugMailAddress) {
+		$message = "DEBUG - original TO: $to\n" . $message;
 		$to = $debugMailAddress;
-		# FIXME - KDYŽ BUDE DEBUG do zprávy přidat, kam to mělo původně jít
 	}
 	# FIXME - set proper mail addresses
 	my $from = "perun\@censet.cz";
@@ -1496,6 +1516,7 @@ sub sendMail($$) {
 	my $subject = "O365 - Notifikace";
 
 	my $mail = MIME::Lite->new(
+		Type     => 'text/plain; charset=UTF-8',
 		From     => $from,
 		To       => $to,
 		'Reply-To' => $reply,
@@ -1506,7 +1527,7 @@ sub sendMail($$) {
 	#FIXME
 	#$mail->send;
 
-	print "Sending email message to: $to \n $message \n\n";
+	print "Sending email message to: $to\n$message\n\n";
 }
 
 #
@@ -1525,7 +1546,7 @@ sub load_manual_employees() {
 	# $dn2\t$timestamp\n
 	foreach my $line (@lines) {
 		my @parts = split /\t/, $line;
-		$manEmp->{$parts[0]} = {$parts[1]};
+		$manEmp->{$parts[0]} = $parts[1];
 	}
 
 	return $manEmp;
@@ -1551,10 +1572,6 @@ sub loadUsersState {
 		                      }
 	}
 
-	#print "loaded:\n";
-	#print Dumper $userState;
-	
-
 	close FILE or die "Cannot close $USER_STATE_FILE: $!";
 	return $userState;
 }
@@ -1563,18 +1580,15 @@ sub storeUserState($$) {
 	my $userState = shift;
 	my $user = shift;
 
-	#print "storing:\n";
-	#print Dumper $userState;
-
 	print USER_STATE_TMP_FILEHANDLE join($USER_STATE_SEPARATOR, ($user, 
 	                                                             $userState->{$user}->{$USER_STATE_ROLES}, 
 	                                                             ($userState->{$user}->{$USER_STATE_GP_EMPLOYEE} ? join($USER_STATE_DATE_SEPARATOR, @{$userState->{$user}->{$USER_STATE_GP_EMPLOYEE}}) : ""), 
 	                                                             ($userState->{$user}->{$USER_STATE_GP_STUDENT} ? join($USER_STATE_DATE_SEPARATOR, @{$userState->{$user}->{$USER_STATE_GP_STUDENT}}) : ""), 
-	                                                             $userState->{$user}->{$USER_STATE_GP_NOTIFICATION_SENT} || $USER_STATE_GP_NOTIFICATION_SENT_NONE,   #FIXME
+	                                                             $userState->{$user}->{$USER_STATE_GP_NOTIFICATION_SENT} || $USER_STATE_GP_NOTIFICATION_SENT_NONE,
 	                                                            )
 	                                     );
 	print USER_STATE_TMP_FILEHANDLE "\n";
-	$userState->{$user} = undef;
+	delete $userState->{$user};
 	return $userState;
 }
 
@@ -1675,16 +1689,20 @@ sub getGracePeriods($) {
 
 }
 
-sub getEmailTemplate($$) {
-	my ($oldRoles, $newRoles) = @_;
+sub getEmailTemplateAndSetNotificationSentState($$$) {
+	my ($oldRoles, $newRoles, $user) = @_;
 
 	if(haveNoRole($oldRoles) && haveFullRole($newRoles)) {
+		$userState->{$user}->{$USER_STATE_GP_NOTIFICATION_SENT} = $USER_STATE_GP_NOTIFICATION_SENT_NONE;
 		return $MAIL_newUser;
 	} elsif(haveOnlyGracePeriodRole($oldRoles) && haveFullRole($newRoles)) {
+		$userState->{$user}->{$USER_STATE_GP_NOTIFICATION_SENT} = $USER_STATE_GP_NOTIFICATION_SENT_NONE;
 		return $MAIL_extendedGracePeriod;
 	} elsif(haveOnlyAlumniRole($oldRoles) && haveFullRole($newRoles)) {
+		$userState->{$user}->{$USER_STATE_GP_NOTIFICATION_SENT} = $USER_STATE_GP_NOTIFICATION_SENT_NONE;
 		return $MAIL_fromAlumniToActiveRole;
 	} elsif(haveFullRole($oldRoles) && haveOnlyGracePeriodRole($newRoles)) {
+		$userState->{$user}->{$USER_STATE_GP_NOTIFICATION_SENT} = $USER_STATE_GP_NOTIFICATION_SENT_INICIAL;
 		if($newRoles & $F_ALUMNI) {
 			if($newRoles & $GP_EMPLOYEE) {
 				return $MAIL_GPStartAlumni_allowExtension;
@@ -1717,23 +1735,31 @@ sub roleToString($) {
 #Notify about expiring grace periods $GRACE_PERIOD_EXPIRATION_NOTIFICATION_DELTA_DAYS days before.
 #
 # returns expired grace period roles
-sub expireAndNotifyGracePeriods($) {
+sub expireAndNotifyGracePeriods($$) {
 	my $user = shift;
 	my $roles = shift;
 	my $expiredRoles = $R_NONE;
 
-	my $employeeGPExpirationInDays = Delta_Days(@{$userState->{$user}->{$USER_STATE_GP_EMPLOYEE}}, @today);
-	my $studentGPExpirationInDays = Delta_Days(@{$userState->{$user}->{$USER_STATE_GP_STUDENT}}, @today);
+	my $employeeGPExpirationInDays = $userState->{$user}->{$USER_STATE_GP_EMPLOYEE} ? Delta_Days(@today, Add_Delta_Days(@{$userState->{$user}->{$USER_STATE_GP_EMPLOYEE}}, $GRACE_PERIOD_EXPIRATION)) : undef;
+	my $studentGPExpirationInDays = $userState->{$user}->{$USER_STATE_GP_STUDENT} ? Delta_Days(@today, Add_Delta_Days(@{$userState->{$user}->{$USER_STATE_GP_STUDENT}}, $GRACE_PERIOD_EXPIRATION)) : undef;
+
+	unless($employeeGPExpirationInDays || $studentGPExpirationInDays) {
+		#no expiration set
+		return $R_NONE;
+	}
+
+	#print "New --- roles: " . roleToString($roles) . "\n";
 
 	my $laterGPExpirationInDays;
-	if($employeeGPExpirationInDays > $studentGPExpirationInDays) {
+	if($employeeGPExpirationInDays || -1000  >= $studentGPExpirationInDays || -1000) {
 		$laterGPExpirationInDays = $employeeGPExpirationInDays;
 	} else {
 		$laterGPExpirationInDays = $studentGPExpirationInDays;
 	}
 
 	#Do we want to send the expiration reminder
-	if(haveOnlyGracePeriodRole($roles) && $laterGPExpirationInDays < $GRACE_PERIOD_EXPIRATION_NOTIFICATION_DELTA_DAYS && $userState->{$user}->{$USER_STATE_GP_NOTIFICATION_SENT} == $USER_STATE_GP_NOTIFICATION_SENT_INICIAL) { 
+	print "role " . haveOnlyGracePeriodRole($roles) . " expiration $laterGPExpirationInDays    state " . $userState->{$user}->{$USER_STATE_GP_NOTIFICATION_SENT} . "\n";
+	if(haveOnlyGracePeriodRole($roles) && $laterGPExpirationInDays <= $GRACE_PERIOD_EXPIRATION_NOTIFICATION_DELTA_DAYS && $userState->{$user}->{$USER_STATE_GP_NOTIFICATION_SENT} == $USER_STATE_GP_NOTIFICATION_SENT_INICIAL) { 
 		my $mail;
 		if($roles & $F_ALUMNI) {
 			if($employeeGPExpirationInDays > $studentGPExpirationInDays) {
@@ -1747,10 +1773,11 @@ sub expireAndNotifyGracePeriods($) {
 
 		$mail = substituteVariablesInEmailTemplate($mail, $user, $roles);
 
-		sendMail($mail, ""); #TODO
+		sendMail($mail, $mailAdresses{$user});
 		$userState->{$user}->{$USER_STATE_GP_NOTIFICATION_SENT} = $USER_STATE_GP_NOTIFICATION_SENT_REMINDER;
 	}
 
+=c chceme delat zde??  TODO
 	if($employeeGPExpirationInDays < 0) {
 		$userState->{$user}->{$USER_STATE_GP_EMPLOYEE} = undef;
 		$expiredRoles |= $GP_EMPLOYEE;
@@ -1760,6 +1787,7 @@ sub expireAndNotifyGracePeriods($) {
 		$userState->{$user}->{$USER_STATE_GP_STUDENT} = undef;
 		$expiredRoles |= $GP_STUDENT;
 	}
+=cut 
 
 	return $expiredRoles;
 }
@@ -1770,6 +1798,9 @@ sub substituteVariablesInEmailTemplate {
 	my $user = shift;
 	my $roles = shift;
 
+	my $employeeExpiration = $userState->{$user}->{$USER_STATE_GP_EMPLOYEE} ? Date_to_Days @{$userState->{$user}->{$USER_STATE_GP_EMPLOYEE}} : 0;
+	my $studentExpiration = $userState->{$user}->{$USER_STATE_GP_STUDENT} ? Date_to_Days @{$userState->{$user}->{$USER_STATE_GP_STUDENT}} : 0;
+
 		my $substituteRole;
 		if($roles & $R_EMPLOYEE) {
 			$substituteRole = $roles & $F_MANUAL ? $MAIL_SUBSTITUTE_O365ROLE_MANUAL : $MAIL_SUBSTITUTE_O365ROLE_EMPLOYEE;
@@ -1777,7 +1808,7 @@ sub substituteVariablesInEmailTemplate {
 			$substituteRole = $MAIL_SUBSTITUTE_O365ROLE_STUDENT;
 		} elsif($roles & ($GP_EMPLOYEE | $GP_STUDENT)) {
 			#select one which expires later
-
+			$substituteRole = $employeeExpiration >= $studentExpiration ? $MAIL_SUBSTITUTE_O365ROLE_EMPLOYEE : $MAIL_SUBSTITUTE_O365ROLE_STUDENT;
 		} elsif($roles & $GP_EMPLOYEE) {
 			$substituteRole = $roles & $F_MANUAL ? $MAIL_SUBSTITUTE_O365ROLE_MANUAL : $MAIL_SUBSTITUTE_O365ROLE_EMPLOYEE;
 		} elsif($roles & $GP_STUDENT) {
@@ -1788,16 +1819,13 @@ sub substituteVariablesInEmailTemplate {
 
 
 	# expiration date replacement
-	my $expirationDate;
+	my $expirationDateString;
 	if($template =~ /$MAIL_SUBSTITUTE_PLACEHOLDER_O365EXPIRATION/) {
-		if(Date_to_Days(@{$userState->{$user}->{$USER_STATE_GP_EMPLOYEE}}, @today) >= Date_to_Days(@{$userState->{$user}->{$USER_STATE_GP_STUDENT}}, @today)) {
-			$expirationDate = join($USER_STATE_DATE_SEPARATOR, @{$userState->{$user}->{$USER_STATE_GP_EMPLOYEE}});
-		} else {
-			$expirationDate = join($USER_STATE_DATE_SEPARATOR, @{$userState->{$user}->{$USER_STATE_GP_STUDENT}});
-		}
+		my @expirationDate = Add_Delta_Days(@{$userState->{$user}->{$employeeExpiration >= $studentExpiration ? $USER_STATE_GP_EMPLOYEE : $USER_STATE_GP_STUDENT}}, $GRACE_PERIOD_EXPIRATION);
+		$expirationDateString = join(".", reverse @expirationDate);
 	}
 
-	$template =~ s/$MAIL_SUBSTITUTE_PLACEHOLDER_O365EXPIRATION/$expirationDate/;
+	$template =~ s/$MAIL_SUBSTITUTE_PLACEHOLDER_O365EXPIRATION/$expirationDateString/;
 
 
 	return $template;
@@ -1811,7 +1839,7 @@ sub haveNoRole {
 
 sub haveFullRole {
 	my $role = shift;
-	return $role & ($R_STUDENT | $R_EMPLOYEE | $GP_STUDENT | $GP_EMPLOYEE);
+	return $role & ($R_STUDENT | $R_EMPLOYEE);
 	
 }
 
